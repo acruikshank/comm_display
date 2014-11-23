@@ -15,6 +15,7 @@
 #define BUFFER_SIZE 8
 
 enum states { CONTROL_OPEN, LEFT_CONTROL, LEFT_SENDING, RIGHT_CONTROL, RIGHT_SENDING };
+enum bufferPos { BUFFER_LEFT, BUFFER_RIGHT };
 
 PS2Keyboard keyboard;
 int i=0;
@@ -55,7 +56,9 @@ void loop() {
   switch (state) {
     case CONTROL_OPEN:
     case RIGHT_CONTROL: rightControl(); break;
+    case LEFT_CONTROL: rightControl(); break;
     case RIGHT_SENDING: rightSending(); break;
+    case LEFT_SENDING: leftSending(); break;
   }
 //  delay(20);
 }
@@ -68,8 +71,13 @@ void rightControl() {
       if (charPointer > 0)
         buffer[--charPointer] = 0;
     } else if (c == PS2_ENTER) {
-      sendShift = 0;
-      state = RIGHT_SENDING;
+      if (state == LEFT_CONTROL) {
+        sendShift = 224;
+        state = LEFT_SENDING;
+      } else {
+        sendShift = 0;
+        state = RIGHT_SENDING;
+      }
     } else {
       if (charPointer < BUFFER_SIZE)
         buffer[charPointer++] = c;
@@ -86,7 +94,16 @@ void rightControl() {
 void rightSending() {
   sendShift++;
   if (sendShift + 8 * BUFFER_SIZE > PIXEL_COUNT) {
-    state = CONTROL_OPEN;
+    state = LEFT_CONTROL;
+    return;
+  }
+  bitLights(buffer);
+}
+
+void leftSending() {
+  sendShift--;
+  if (sendShift == 0) {
+    state = RIGHT_CONTROL;
     return;
   }
   bitLights(buffer);
@@ -97,7 +114,7 @@ void bitLights(char *buffer) {
   for (int i=0; i<8; i++) {
     for (int j=0; j<8; j++) {
       int pos = sendShift + i*8+j;
-      strip.setPixelColor( pos, (buffer[i] >> j) & 0x1 ? Wheel(pos+charPointer*6) : strip.Color(0,0,0) );
+      strip.setPixelColor( pos, (buffer[i] >> j) & 0x1 ? Wheel(pos+charPointer*i) : strip.Color(0,0,0) );
     }
   }
   strip.show();
@@ -116,4 +133,4 @@ uint32_t Wheel(byte WheelPos) {
    WheelPos -= 170;
    return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
   }
-}
+}\
