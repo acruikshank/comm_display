@@ -3,43 +3,64 @@
 // press the button it will change to a new pixel animation.  Note that you need to press the
 // button once to start the first animation!
 
-#include <Adafruit_NeoPixel.h>
 #include <PS2Keyboard.h>
 #include <SerialLCD.h>
 #include <Wire.h>
+#include <OctoWS2811.h>
 
-#define PIXEL_PIN 6    // Digital IO pin connected to the NeoPixels.
-#define KEYBOARD_DATA_PIN 8
-#define KEYBOARD_IRQ_PIN 5
-#define PIXEL_COUNT 288
+
+
+#define KEYBOARD_DATA_PIN 0
+#define KEYBOARD_IRQ_PIN 1
+#define CENTER_PIXEL_COUNT 600
+#define LEFT_PIXEL_COUNT 72
+#define RIGHT_PIXEL_COUNT 72
 #define BUFFER_SIZE 8
 
+const int ledsPerStrip = 72;
+const int WORD_LENGTH = BUFFER_SIZE * 8;
+const int LINE_LENGTH = ledsPerStrip * 4;
+
 enum states { CONTROL_OPEN, LEFT_CONTROL, LEFT_SENDING, RIGHT_CONTROL, RIGHT_SENDING };
+enum bufferPos { BUFFER_LEFT, BUFFER_RIGHT };
+
+DMAMEM int displayMemory[ledsPerStrip*6];
+int drawingMemory[ledsPerStrip*6];
+
+const int config = WS2811_GRB | WS2811_800kHz;
+
+OctoWS2811 leds(ledsPerStrip, displayMemory, drawingMemory, config);
+
 
 PS2Keyboard keyboard;
 int i=0;
-
-// Parameter 1 = number of pixels in strip,  neopixel stick has 8
-// Parameter 2 = pin number (most are valid)
-// Parameter 3 = pixel type flags, add together as needed:
-//   NEO_RGB     Pixels are wired for RGB bitstream
-//   NEO_GRB     Pixels are wired for GRB bitstream, correct for neopixel stick
-//   NEO_KHZ400  400 KHz bitstream (e.g. FLORA pixels)
-//   NEO_KHZ800  800 KHz bitstream (e.g. High Density LED strip), correct for neopixel stick
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(PIXEL_COUNT, PIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 SerialLCD lcd(2,16,0x28,I2C);
 char buffer[BUFFER_SIZE + 1];
 int charPointer = 0;
 int sendShift = 0;
+int transmitShift = 0;
+int receiveShift = 0;
 int state = CONTROL_OPEN;
+int rainbowColors[180];
+int activeTransmitLed = 0;
 
+boolean ledState = 0;
 void setup() {
   // Initialize LCD module
   lcd.init();
+  for (int i=0; i<180; i++) {
+    int hue = i * 2;
+    int saturation = 100;
+    int lightness = 50;
+    // pre-compute the 180 rainbow colors
+    rainbowColors[i] = makeColor(hue, saturation, lightness);
+  }
 
-  strip.begin();
-  strip.show(); // Initialize all pixels to 'off'
+
+  leds.begin();
+  clearLeds();
+  leds.show();
 
   keyboard.begin(KEYBOARD_DATA_PIN, KEYBOARD_IRQ_PIN);
   Serial.begin(9600);
@@ -54,13 +75,23 @@ void setup() {
 void loop() {
   switch (state) {
     case CONTROL_OPEN:
-    case RIGHT_CONTROL: rightControl(); break;
+    case RIGHT_CONTROL: control(true); break;
+    case LEFT_CONTROL: control(false); break;
     case RIGHT_SENDING: rightSending(); break;
+    case LEFT_SENDING: leftSending(); break;
   }
-//  delay(20);
+//  delay(6);
 }
 
-void rightControl() {
+//writes zeroes to the entire strip buffer
+void clearLeds() {
+  for (i=0; i < ledsPerStrip * 3; i++) {
+    leds.setPixel(i, 0);
+  }
+}
+
+
+void control(boolean rightSide) {
   if (keyboard.available()) {
     char c = keyboard.read();
 
@@ -68,14 +99,22 @@ void rightControl() {
       if (charPointer > 0)
         buffer[--charPointer] = 0;
     } else if (c == PS2_ENTER) {
-      sendShift = 0;
-      state = RIGHT_SENDING;
+      if (rightSide) {
+        sendShift = 0;
+        transmitShift = WORD_LENGTH;
+        state = RIGHT_SENDING;
+      } else {
+        sendShift = WORD_LENGTH;
+        transmitShift = LINE_LENGTH - WORD_LENGTH;
+        state = LEFT_SENDING;
+      }
     } else {
       if (charPointer < BUFFER_SIZE)
         buffer[charPointer++] = c;
     }
 
     lcd.clear();
+    
     lcd.home();
     lcd.print(buffer);
     
@@ -84,36 +123,71 @@ void rightControl() {
 }
 
 void rightSending() {
-  sendShift++;
-  if (sendShift + 8 * BUFFER_SIZE > PIXEL_COUNT) {
-    state = CONTROL_OPEN;
-    return;
-  }
   bitLights(buffer);
+  transmitShift += 2;
+  if (transmitShift > LINE_LENGTH - WORD_LENGTH) {
+    transmitShift = WORD_LENGTH;
+    sendShift++;
+  }
+  
+  if (sendShift > WORD_LENGTH) {
+    sendShift = WORD_LENGTH;
+    state = LEFT_CONTROL;
+    bitLights(buffer);
+  }
 }
 
-void bitLights(char *buffer) {
-  strip.clear();
-  for (int i=0; i<8; i++) {
-    for (int j=0; j<8; j++) {
-      int pos = sendShift + i*8+j;
-      strip.setPixelColor( pos, (buffer[i] >> j) & 0x1 ? Wheel(pos+charPointer*6) : strip.Color(0,0,0) );
+void leftSending() {
+  bitLights(buffer);
+  transmitShift -= 2;
+  if (transmitShift < WORD_LENGTH) {
+    transmitShift = LINE_LENGTH - WORD_LENGTH - 1;
+    sendShift--;
+    if (sendShift < 0) {
+      sendShift = 0;
+      state = RIGHT_CONTROL;
+      bitLights(buffer);
     }
   }
-  strip.show();
+  
 }
 
-// Input a value 0 to 255 to get a color value.
-// The colours are a transition r - g - b - back to r.
-uint32_t Wheel(byte WheelPos) {
-  WheelPos = 255 - WheelPos;
-  if(WheelPos < 85) {
-   return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
-  } else if(WheelPos < 170) {
-    WheelPos -= 85;
-   return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
-  } else {
-   WheelPos -= 170;
-   return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+void transmitBit() {
+  if((*buffer & ( 1 << sendShift)) >> sendShift) {
+    for (int i=64; i < 223; i++) {
+      leds.setPixel( i, rainbowColors[sendShift % 180]);
+      leds.setPixel( i-1, 0);
+      leds.show();
+    }
   }
+}
+  
+  
+
+void bitLights(char *buffer) {
+  boolean transmit = 0;
+  for (int i=0; i<LINE_LENGTH; i++) leds.setPixel(i,0);
+  
+  if (state == RIGHT_SENDING || state == LEFT_SENDING) {
+    leds.setPixel( transmitShift, rainbowColors[transmitShift % 180] );
+    leds.setPixel( transmitShift-1, rainbowColors[transmitShift % 180] );
+  }
+    
+  for (int i=0; i<8; i++) {
+    for (int j=0; j<8; j++) {
+      
+      int pos = sendShift + i*8+j;
+      if (pos >= WORD_LENGTH)
+        pos += (LINE_LENGTH - 2*WORD_LENGTH);
+      
+      ledState = (buffer[i] >> j) & 0x1;
+      leds.setPixel( pos, ledState * dim(rainbowColors[pos % 180])) ;
+    }
+  }
+  leds.show();
+}
+
+unsigned int dim(unsigned int color) {
+  
+  return (color >> 2) & 4144959;
 }
